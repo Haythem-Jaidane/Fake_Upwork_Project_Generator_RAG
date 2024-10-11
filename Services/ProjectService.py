@@ -1,0 +1,79 @@
+import json
+import logging
+from flask import Flask, jsonify, request
+from langchain_community.llms import Ollama
+from langchain_community.embeddings import OllamaEmbeddings
+import chromadb
+from langchain_core.prompts import PromptTemplate
+
+class ProjectService:
+
+    def load_csv_data(self,file_path):
+        data = []
+        with open(file_path, mode='r', encoding='utf-8') as file:
+            csv_reader = csv.DictReader(file)
+            for row in csv_reader:
+                data.append(row)
+        return data
+
+    def add_csv_data_to_chroma(self,data, chroma_client,ollama_emb, collection_name="upwork_projects"):
+        collection = chroma_client.get_or_create_collection(name=collection_name)
+        for idx, row in enumerate(data):
+            content = f"Title: {row['title']}\nkeyphrases: {row['keyphrases']}\nabstract: {row['abstract']}"
+            embedding_result = ollama_emb.embed_query(content)
+                
+                # Add the document with embeddings to the ChromaDB collection
+            collection.add(
+                embeddings=[embedding_result],
+                documents=[content],
+                ids=[str(idx)]
+            )
+
+            print("hello")
+        logging.info(f"Added {len(data)} records to ChromaDB")
+
+
+    def generate(self):
+        logging.info("Received a request")
+
+        ollama_emb = OllamaEmbeddings(
+            model="mxbai-embed-large",
+        )
+
+        logging.info("Initialized embedding model")
+
+        llm = Ollama(model="phi3", stop=["<|end|>"],temperature=0.4,num_gpu=1)
+        logging.info("Initialized language model")
+
+        chroma_client = chromadb.PersistentClient(path="./db")
+
+        data = json.loads(request.data)
+        logging.debug(f"Received data: {data}")
+
+        try:
+            embed = ollama_emb.embed_query(data["skills"])
+            logging.debug(f"Query embedding: {embed}")
+        except AttributeError as e:
+            logging.error(f"Error with embedding query: {e}")
+            raise
+
+
+        collection = chroma_client.get_collection(name="upwork_projects")
+        results = collection.query(query_embeddings=embed, n_results=10)
+        logging.debug(f"Search response: {results}")
+
+        template = """
+                <|system|>You are a business consultant professional. You will generate fake project upwork description for freelancer to train.
+                the contents is a real project from upwork inspire from them and write a real life fake project.
+                you should make a project from the user skills and background your goal is to prepare user to real freelance so the project
+                should be a next level in skils. 
+                contents:\n\n{contents}\n\n
+                <|end|>\n<|user|>\nI'm {role} generate me fake freelance offer of {level} and this is my skills : \n {skills} <|end|>\n<|assistant|>
+        """
+        prompt = PromptTemplate.from_template(template)
+
+        formatted_contents = "\n".join([doc[0] for doc in results["documents"]])
+        response = llm.invoke(prompt.format(role=data["role"],level=data["level"],skills=data["skills"], contents=formatted_contents))
+        logging.debug(f"LLM response: {response}")
+
+        return response
